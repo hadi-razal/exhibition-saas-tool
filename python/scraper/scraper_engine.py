@@ -11,11 +11,15 @@ import asyncio
 from typing import AsyncGenerator, Optional
 from urllib.parse import urljoin, urlparse
 
+from .ai_scraper import AIScraper
+
 logger = logging.getLogger("exhibitiq.scraper")
 
 
 class ScraperEngine:
     """Orchestrates exhibitor web scraping with analysis and full scrape phases."""
+    def __init__(self):
+        self.ai_scraper = AIScraper()
 
     async def analyze(self, url: str) -> dict:
         """
@@ -596,19 +600,29 @@ class ScraperEngine:
 
             # Extract additional fields from detail page
             if extract_contacts:
-                # Email
-                email_match = re.search(
-                    r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", text
-                )
-                if email_match:
-                    data["email"] = email_match.group(0)
+                # Use AI for high-accuracy detail extraction
+                ai_data = await self.ai_scraper.extract_details(text)
+                
+                # Merge AI extracted data
+                for k, v in ai_data.items():
+                    if v and k not in data:
+                        data[k] = v
+                
+                # Fallback to Regex if AI missed anything critical
+                if "email" not in data:
+                    email_match = re.search(
+                        r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", text
+                    )
+                    if email_match:
+                        data["email"] = email_match.group(0)
 
                 # Phone
-                phone_match = re.search(
-                    r"(?:phone|tel|mobile)[:\s]*([+\d\s().-]{7,20})", text, re.IGNORECASE
-                )
-                if phone_match:
-                    data["phone"] = phone_match.group(1).strip()
+                if "phone" not in data:
+                    phone_match = re.search(
+                        r"(?:phone|tel|mobile)[:\s]*([+\d\s().-]{7,20})", text, re.IGNORECASE
+                    )
+                    if phone_match:
+                        data["phone"] = phone_match.group(1).strip()
 
                 # Social links
                 for a in soup.find_all("a", href=True):

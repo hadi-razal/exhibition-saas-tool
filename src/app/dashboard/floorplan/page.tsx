@@ -24,14 +24,14 @@ interface ProgressStep {
 const PREFERRED_COLUMNS = ["booth_number", "exhibitor_name", "booth_size", "area_sqm", "hall", "zone", "page", "source"];
 
 const COLUMN_LABELS: Record<string, string> = {
-    booth_number:   "Booth No.",
+    booth_number: "Booth No.",
     exhibitor_name: "Exhibitor Name",
-    booth_size:     "Dimensions",
-    area_sqm:       "Area (m²)",
-    hall:           "Hall / Pavilion",
-    zone:           "Zone",
-    page:           "Page",
-    source:         "Source",
+    booth_size: "Dimensions",
+    area_sqm: "Area (m²)",
+    hall: "Hall / Pavilion",
+    zone: "Zone",
+    page: "Page",
+    source: "Source",
 };
 
 export default function FloorPlanPage() {
@@ -42,6 +42,8 @@ export default function FloorPlanPage() {
     const [isProcessing, setIsProcessing] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [searchTerm, setSearchTerm] = useState("");
+    const [hideEmptyName, setHideEmptyName] = useState(false);
+    const [hideEmptySize, setHideEmptySize] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     const handleFileSelect = useCallback((selectedFile: File) => {
@@ -71,11 +73,11 @@ export default function FloorPlanPage() {
         setResults([]);
 
         const steps: ProgressStep[] = [
-            { label: "Uploading file",             status: "active" },
-            { label: "Detecting format",           status: "pending" },
-            { label: "Extracting text layout",     status: "pending" },
-            { label: "Parsing booth blocks",       status: "pending" },
-            { label: "Complete",                   status: "pending" },
+            { label: "Uploading file", status: "active" },
+            { label: "Detecting format", status: "pending" },
+            { label: "Extracting text layout", status: "pending" },
+            { label: "Parsing booth blocks", status: "pending" },
+            { label: "Complete", status: "pending" },
         ];
         setProgress([...steps]);
 
@@ -130,12 +132,12 @@ export default function FloorPlanPage() {
     };
 
     const handleExport = async (format: "csv" | "excel" | "json") => {
-        if (!results.length) return;
+        if (!filteredResults.length) return;
         try {
             const res = await fetch("/api/floorplan/export", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ rows: results, format }),
+                body: JSON.stringify({ rows: filteredResults, format }),
             });
             if (!res.ok) throw new Error("Export failed");
             const blob = await res.blob();
@@ -150,23 +152,31 @@ export default function FloorPlanPage() {
         }
     };
 
-    const filteredResults = results.filter((row) =>
-        Object.values(row).some((v) => String(v ?? "").toLowerCase().includes(searchTerm.toLowerCase()))
-    );
+    const filteredResults = results.filter((row) => {
+        if (hideEmptyName && (!row.exhibitor_name || !row.exhibitor_name.trim())) return false;
+        if (hideEmptySize && (!row.area_sqm || !row.area_sqm.trim())) return false;
+        if (searchTerm) {
+            return Object.values(row).some((v) => String(v ?? "").toLowerCase().includes(searchTerm.toLowerCase()));
+        }
+        return true;
+    });
 
-    const allKeys = results.length > 0 ? Object.keys(results[0]) : [];
+    const allKeysSet = new Set<string>();
+    results.forEach((row) => Object.keys(row).forEach((k) => allKeysSet.add(k)));
+    const allKeys = Array.from(allKeysSet);
+
     const columns = [
         ...PREFERRED_COLUMNS.filter((c) => allKeys.includes(c)),
         ...allKeys.filter((k) => !PREFERRED_COLUMNS.includes(k) && k !== "raw_text" && k !== "line_number"),
     ];
 
-    const withExhibitor  = results.filter((r) => r.exhibitor_name?.trim()).length;
-    const boothOnly      = results.filter((r) => !r.exhibitor_name?.trim()).length;
+    const withExhibitor = results.filter((r) => r.exhibitor_name?.trim()).length;
+    const boothOnly = results.filter((r) => !r.exhibitor_name?.trim()).length;
     const withDimensions = results.filter((r) => r.booth_size?.trim()).length;
-    const withArea       = results.filter((r) => r.area_sqm?.trim()).length;
+    const withArea = results.filter((r) => r.area_sqm?.trim()).length;
 
     return (
-        <div className="min-h-screen py-10" style={{ background: "oklch(0.975 0.006 240)" }}>
+        <div className="min-h-screen py-10 bg-gradient-to-br from-slate-50 to-slate-100/50">
             <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
                 {/* Header */}
                 <div className="flex items-center gap-3 mb-8">
@@ -265,22 +275,21 @@ export default function FloorPlanPage() {
 
                         {/* Progress */}
                         {progress.length > 0 && (
-                            <div className="card-elevated rounded-xl p-4">
-                                <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider mb-3">Progress</p>
-                                <div className="space-y-2.5">
+                            <div className="card-elevated rounded-2xl p-6 bg-white/80 backdrop-blur-xl border border-white/40 shadow-xl shadow-primary/5">
+                                <p className="text-xs font-bold text-primary uppercase tracking-widest mb-4">Extraction Pipeline</p>
+                                <div className="space-y-4 relative before:absolute before:inset-0 before:ml-[11px] before:-translate-x-px before:h-full before:w-0.5 before:bg-gradient-to-b before:from-transparent before:via-border/80 before:to-transparent">
                                     {progress.map((step, i) => (
-                                        <div key={i} className="flex items-center gap-3">
-                                            <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] flex-shrink-0 transition-colors
-                                                ${step.status === "done"  ? "bg-emerald-100 text-emerald-600 border border-emerald-200"
-                                                : step.status === "active" ? "bg-primary/10 text-primary border border-primary/20 animate-pulse"
-                                                : step.status === "error"  ? "bg-red-100 text-red-500 border border-red-200"
-                                                : "bg-muted text-muted-foreground/40 border border-border"}`}>
-                                                {step.status === "done" ? "✓" : step.status === "error" ? "✕" : i + 1}
+                                        <div key={i} className="relative flex items-center gap-4">
+                                            <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] flex-shrink-0 transition-all duration-500 shadow-sm z-10
+                                                ${step.status === "done" ? "bg-emerald-500 text-white shadow-emerald-500/30 scale-110"
+                                                    : step.status === "active" ? "bg-primary text-white shadow-primary/40 scale-110 animate-pulse"
+                                                        : step.status === "error" ? "bg-red-500 text-white shadow-red-500/30 scale-110"
+                                                            : "bg-muted text-muted-foreground border-2 border-background"}`}>
+                                                {step.status === "done" ? <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" /></svg> : step.status === "error" ? "✕" : i + 1}
                                             </div>
-                                            <span className={`text-xs leading-tight ${
-                                                step.status === "active" ? "text-foreground font-semibold"
-                                                : step.status === "done"  ? "text-muted-foreground"
-                                                : "text-muted-foreground/50"}`}>
+                                            <span className={`text-sm tracking-wide transition-colors duration-300 ${step.status === "active" ? "text-foreground font-bold"
+                                                : step.status === "done" ? "text-muted-foreground font-medium"
+                                                    : "text-muted-foreground/40 font-medium"}`}>
                                                 {step.label}
                                             </span>
                                         </div>
@@ -329,18 +338,62 @@ export default function FloorPlanPage() {
                         {results.length > 0 ? (
                             <div className="space-y-4">
                                 {/* Stats */}
-                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                                <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
                                     {[
-                                        { value: results.length, label: "Total Booths",    accent: "text-foreground" },
-                                        { value: withExhibitor,  label: "With Exhibitor",  accent: "text-emerald-600" },
-                                        { value: boothOnly,      label: "Booth Only",      accent: "text-amber-600" },
-                                        { value: withDimensions, label: "With Dimensions", accent: "text-primary" },
+                                        { value: results.length, label: "Total Booths", accent: "text-foreground", bg: "bg-white/60" },
+                                        { value: withExhibitor, label: "With Exhibitor", accent: "text-emerald-600", bg: "bg-emerald-50/50" },
+                                        { value: boothOnly, label: "Booth Only", accent: "text-amber-600", bg: "bg-amber-50/50" },
+                                        { value: withDimensions, label: "With Dimensions", accent: "text-primary", bg: "bg-primary/5" },
                                     ].map((s) => (
-                                        <div key={s.label} className="card-elevated rounded-xl p-4">
-                                            <div className={`text-2xl font-bold tabular-nums ${s.accent}`}>{s.value}</div>
-                                            <div className="text-xs text-muted-foreground mt-0.5">{s.label}</div>
+                                        <div key={s.label} className={`rounded-2xl p-5 border border-border/50 backdrop-blur-md shadow-sm transition-transform hover:-translate-y-1 duration-300 ${s.bg}`}>
+                                            <div className={`text-3xl font-black tabular-nums tracking-tight ${s.accent}`}>{s.value}</div>
+                                            <div className="text-xs font-semibold text-muted-foreground mt-1 uppercase tracking-wider">{s.label}</div>
                                         </div>
                                     ))}
+                                </div>
+
+                                {/* Filter Toggles */}
+                                <div className="flex flex-wrap items-center gap-3 px-1">
+                                    <span className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Filters:</span>
+                                    <button
+                                        onClick={() => setHideEmptyName((v) => !v)}
+                                        className={`flex items-center gap-2 text-xs font-medium px-3 py-1.5 rounded-lg border transition-all duration-200 ${hideEmptyName
+                                            ? "bg-primary/10 border-primary/30 text-primary shadow-sm"
+                                            : "bg-white border-border text-muted-foreground hover:border-primary/20 hover:text-foreground"
+                                            }`}
+                                    >
+                                        <div className={`w-3.5 h-3.5 rounded border-2 flex items-center justify-center transition-all ${hideEmptyName ? "bg-primary border-primary" : "border-muted-foreground/30"
+                                            }`}>
+                                            {hideEmptyName && (
+                                                <svg className="w-2.5 h-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+                                                </svg>
+                                            )}
+                                        </div>
+                                        Hide empty Exhibitor Name
+                                    </button>
+                                    <button
+                                        onClick={() => setHideEmptySize((v) => !v)}
+                                        className={`flex items-center gap-2 text-xs font-medium px-3 py-1.5 rounded-lg border transition-all duration-200 ${hideEmptySize
+                                            ? "bg-primary/10 border-primary/30 text-primary shadow-sm"
+                                            : "bg-white border-border text-muted-foreground hover:border-primary/20 hover:text-foreground"
+                                            }`}
+                                    >
+                                        <div className={`w-3.5 h-3.5 rounded border-2 flex items-center justify-center transition-all ${hideEmptySize ? "bg-primary border-primary" : "border-muted-foreground/30"
+                                            }`}>
+                                            {hideEmptySize && (
+                                                <svg className="w-2.5 h-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+                                                </svg>
+                                            )}
+                                        </div>
+                                        Hide empty Area (m²)
+                                    </button>
+                                    {(hideEmptyName || hideEmptySize) && (
+                                        <span className="text-[10px] text-primary font-semibold bg-primary/5 border border-primary/15 px-2 py-0.5 rounded-full">
+                                            Export will use filtered data ({filteredResults.length} rows)
+                                        </span>
+                                    )}
                                 </div>
 
                                 {/* Search & Export */}
@@ -380,50 +433,50 @@ export default function FloorPlanPage() {
                                 </p>
 
                                 {/* Table */}
-                                <div className="card-elevated rounded-xl overflow-hidden">
-                                    <div className="overflow-x-auto">
+                                <div className="rounded-2xl border border-border/50 bg-white/60 backdrop-blur-xl shadow-xl shadow-primary/5 overflow-hidden">
+                                    <div className="overflow-x-auto overflow-y-auto max-h-[60vh]">
                                         <table className="w-full text-sm">
-                                            <thead>
-                                                <tr className="border-b border-border bg-accent/60">
+                                            <thead className="sticky top-0 z-10">
+                                                <tr className="border-b border-border/50 bg-accent/50 backdrop-blur-md">
                                                     {columns.map((col) => (
-                                                        <th key={col} className="text-left px-4 py-3 text-[11px] font-bold text-muted-foreground uppercase tracking-wider whitespace-nowrap">
+                                                        <th key={col} className="text-left px-5 py-4 text-xs font-bold text-muted-foreground uppercase tracking-widest whitespace-nowrap">
                                                             {COLUMN_LABELS[col] ?? col.replace(/_/g, " ")}
                                                         </th>
                                                     ))}
                                                 </tr>
                                             </thead>
-                                            <tbody>
+                                            <tbody className="divide-y divide-border/40">
                                                 {filteredResults.map((row, i) => {
                                                     const hasName = row.exhibitor_name?.trim();
                                                     return (
-                                                        <tr key={i} className="border-b border-border/60 hover:bg-accent/40 transition-colors">
+                                                        <tr key={i} className="hover:bg-white/80 transition-colors group">
                                                             {columns.map((col) => {
                                                                 const val = row[col];
                                                                 const empty = val === undefined || val === null || val === "";
 
                                                                 if (col === "booth_number") return (
-                                                                    <td key={col} className="px-4 py-3 whitespace-nowrap">
-                                                                        <span className="font-mono text-xs font-bold bg-primary/8 text-primary border border-primary/15 px-2 py-0.5 rounded-md">
+                                                                    <td key={col} className="px-5 py-4 whitespace-nowrap">
+                                                                        <span className="font-mono text-xs font-bold bg-gradient-to-br from-primary/10 to-primary/5 text-primary border border-primary/20 px-2.5 py-1 rounded-md shadow-sm">
                                                                             {String(val ?? "—")}
                                                                         </span>
                                                                     </td>
                                                                 );
 
                                                                 if (col === "exhibitor_name") return (
-                                                                    <td key={col} className="px-4 py-3 whitespace-nowrap">
+                                                                    <td key={col} className="px-5 py-4 whitespace-nowrap">
                                                                         {hasName
-                                                                            ? <span className="font-semibold text-foreground">{String(val)}</span>
-                                                                            : <span className="text-muted-foreground/50 text-xs italic">No name listed</span>
+                                                                            ? <span className="font-semibold text-slate-800 group-hover:text-primary transition-colors">{String(val)}</span>
+                                                                            : <span className="text-muted-foreground/40 text-xs italic">No name listed</span>
                                                                         }
                                                                     </td>
                                                                 );
 
                                                                 if (col === "source") return (
-                                                                    <td key={col} className="px-4 py-3 whitespace-nowrap">
-                                                                        <span className={`text-[10px] px-2 py-0.5 rounded-full font-semibold border
+                                                                    <td key={col} className="px-5 py-4 whitespace-nowrap">
+                                                                        <span className={`text-[10px] px-2.5 py-1 rounded-full font-bold tracking-wide uppercase border
                                                                             ${val === "vector" ? "bg-blue-50 text-blue-600 border-blue-200"
-                                                                            : val === "block"  ? "bg-emerald-50 text-emerald-600 border-emerald-200"
-                                                                            : "bg-amber-50 text-amber-600 border-amber-200"
+                                                                                : val === "block" ? "bg-emerald-50 text-emerald-600 border-emerald-200"
+                                                                                    : "bg-amber-50 text-amber-600 border-amber-200"
                                                                             }`}>
                                                                             {String(val ?? "—")}
                                                                         </span>
@@ -431,7 +484,7 @@ export default function FloorPlanPage() {
                                                                 );
 
                                                                 return (
-                                                                    <td key={col} className={`px-4 py-3 whitespace-nowrap ${empty ? "text-muted-foreground/30 text-xs" : "text-foreground"}`}>
+                                                                    <td key={col} className={`px-5 py-4 whitespace-nowrap ${empty ? "text-muted-foreground/30 text-xs" : "text-slate-600 font-medium"}`}>
                                                                         {empty ? "—" : String(val)}
                                                                     </td>
                                                                 );
@@ -443,8 +496,13 @@ export default function FloorPlanPage() {
                                         </table>
                                     </div>
                                     {filteredResults.length === 0 && searchTerm && (
-                                        <div className="py-12 text-center">
-                                            <p className="text-sm text-muted-foreground">No booths match &quot;{searchTerm}&quot;</p>
+                                        <div className="py-16 text-center bg-white/40 backdrop-blur-sm">
+                                            <div className="w-12 h-12 rounded-full bg-accent flex items-center justify-center mx-auto mb-3">
+                                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-muted-foreground">
+                                                    <circle cx="11" cy="11" r="8" /><path d="m21 21-4.35-4.35" />
+                                                </svg>
+                                            </div>
+                                            <p className="text-sm font-medium text-slate-600">No booths match &quot;{searchTerm}&quot;</p>
                                         </div>
                                     )}
                                 </div>
@@ -475,6 +533,6 @@ export default function FloorPlanPage() {
                     </div>
                 </div>
             </div>
-        </div>
+        </div >
     );
 }

@@ -112,6 +112,49 @@ class OCREngine:
 
         return sharpened
 
+    @staticmethod
+    def _configure_tesseract():
+        """
+        Auto-detect Tesseract installation path.
+        On Windows, pytesseract cannot find the executable unless the path is set explicitly.
+        Checks common install locations and raises a clear error if not found.
+        """
+        import os
+        import shutil
+
+        try:
+            import pytesseract
+        except ImportError:
+            raise RuntimeError(
+                "pytesseract not installed. Run: pip install pytesseract"
+            )
+
+        # If already findable via PATH, nothing to do
+        if shutil.which("tesseract"):
+            return
+
+        if os.name == "nt":  # Windows
+            username = os.environ.get("USERNAME", "user")
+            candidates = [
+                r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+                r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+                rf"C:\Users\{username}\AppData\Local\Programs\Tesseract-OCR\tesseract.exe",
+                r"C:\tools\Tesseract-OCR\tesseract.exe",
+                r"C:\ProgramData\chocolatey\bin\tesseract.exe",
+            ]
+            for path in candidates:
+                if os.path.isfile(path):
+                    pytesseract.pytesseract.tesseract_cmd = path
+                    logger.info(f"Tesseract configured at: {path}")
+                    return
+
+            raise RuntimeError(
+                "Tesseract OCR not found. Please install it:\n"
+                "  Download: https://github.com/UB-Mannheim/tesseract/wiki\n"
+                "  Default path: C:\\Program Files\\Tesseract-OCR\\tesseract.exe\n"
+                "  Or add Tesseract to your system PATH and restart."
+            )
+
     def _run_tesseract_multipass(self, image: np.ndarray) -> tuple[str, list[str], list[dict]]:
         """
         Run Tesseract with multiple PSM modes and merge results.
@@ -120,6 +163,8 @@ class OCREngine:
         PSM 12: Sparse text with OSD — additional coverage
         Returns (full_text, blocks, word_boxes)
         """
+        self._configure_tesseract()
+
         try:
             import pytesseract
             from PIL import Image
@@ -166,8 +211,8 @@ class OCREngine:
                 plain = pytesseract.image_to_string(pil_img, config="--oem 3 --psm 11")
                 return plain, [plain], []
 
-            # Group words into spatial blocks
-            blocks = self._group_into_blocks(word_boxes)
+            # Group words into spatial blocks using OpenCV geometric shapes
+            blocks = self._group_geometrically(word_boxes, image)
 
             full_text = "\n".join(
                 " ".join(w["text"] for w in sorted(b, key=lambda x: (x["y"], x["x"])))
@@ -185,6 +230,68 @@ class OCREngine:
             raise RuntimeError(
                 f"OCR failed. Ensure Tesseract is installed. Error: {e}"
             )
+
+    def _group_geometrically(self, word_boxes: list[dict], img: np.ndarray) -> list[list[dict]]:
+        """
+        Group word boxes using mathematical bounding shapes extracted via OpenCV contour detection.
+        Ensures that text within the same drawn cell/rectangle is kept together, even if spaced far apart.
+        Falls back to proximity clustering for text not inside any clear box.
+        """
+        import cv2
+
+        if not word_boxes:
+            return []
+
+        # 1. Find contours on the binarized image using Canny edges
+        edges = cv2.Canny(img, 50, 150)
+        kernel = np.ones((3, 3), np.uint8)
+        dilated = cv2.dilate(edges, kernel, iterations=1)
+
+        # RETR_LIST gets all contours including inner grid cells
+        contours, _ = cv2.findContours(dilated, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+
+        h_img, w_img = img.shape[:2]
+        boxes = []
+        # Min area to avoid noise (e.g. 70x70 pixels in a 3000px image)
+        min_area = 4500
+        max_area = (h_img * w_img) * 0.8  # Ignore huge outer map frames
+
+        for c in contours:
+            x, y, w, h = cv2.boundingRect(c)
+            area = w * h
+            if min_area < area < max_area:
+                boxes.append((x, y, w, h))
+
+        # Sort by area ascending so smaller/inner boxes (individual booths) catch the text first
+        boxes.sort(key=lambda b: b[2] * b[3])
+
+        clusters: list[list[dict]] = []
+        used_indices = set()
+
+        for (bx, by, bw, bh) in boxes:
+            current_cluster = []
+            for i, word in enumerate(word_boxes):
+                if i in used_indices:
+                    continue
+                # Center of the word
+                cx = word["x"] + word["w"] / 2
+                cy = word["y"] + word["h"] / 2
+                
+                # If word center is inside this bounding box
+                if bx <= cx <= (bx + bw) and by <= cy <= (by + bh):
+                    current_cluster.append(word)
+                    used_indices.add(i)
+            
+            if current_cluster:
+                clusters.append(current_cluster)
+
+        # 2. For remaining unboxed words, fallback to proximity grouping
+        leftover_words = [w for i, w in enumerate(word_boxes) if i not in used_indices]
+        if leftover_words:
+            fallback_clusters = self._group_into_blocks(leftover_words)
+            clusters.extend(fallback_clusters)
+
+        return clusters
 
     def _group_into_blocks(self, word_boxes: list[dict]) -> list[list[dict]]:
         """
