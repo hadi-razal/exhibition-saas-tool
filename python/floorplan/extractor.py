@@ -1,13 +1,12 @@
 """
-Floor Plan Extractor — Main orchestrator module.
+Floor Plan Extractor — Main orchestrator.
 
-Multi-layered extraction pipeline:
-1. Direct PDF text extraction (PyMuPDF / pdfplumber)
-2. OCR fallback for scanned/image-based content
-3. Regex pattern matching for booth numbers, sizes, halls, exhibitor names
+Extraction pipeline (Python tools only, no external AI API):
+1. For vector PDFs  → PyMuPDF spatial block extraction (text + positions)
+2. For image PDFs   → pdf2image + Tesseract OCR (PSM 11, multi-pass) + spatial clustering
+3. For image files  → Tesseract OCR + spatial clustering
+Pattern matching works block-by-block for accurate field identification.
 """
-import os
-import re
 import logging
 from pathlib import Path
 from typing import AsyncGenerator
@@ -29,82 +28,102 @@ class FloorPlanExtractor:
 
     async def extract(self, file_path: str) -> AsyncGenerator[dict, None]:
         """
-        Extract structured data from a floor plan file.
-        Yields SSE-compatible progress events and final results.
+        Extract structured booth data from a floor plan file.
+        Yields SSE-compatible progress events and a final result event.
         """
         path = Path(file_path)
         ext = path.suffix.lower()
-        all_rows = []
+        all_rows: list[dict] = []
 
-        # Step 0: Upload received
-        yield {"type": "progress", "step": 0, "message": "File uploaded"}
-
-        # Step 1: Detect format
-        yield {"type": "progress", "step": 1, "message": f"Detected format: {ext}"}
+        yield {"type": "progress", "step": 0, "message": "File uploaded successfully"}
+        yield {"type": "progress", "step": 1, "message": f"Detected format: {ext.upper()}"}
 
         try:
             if ext == ".pdf":
-                # Try direct text extraction first
-                yield {"type": "progress", "step": 2, "message": "Extracting PDF text..."}
+                # --- Phase 1: Try spatial block extraction (vector PDFs) ---
+                yield {"type": "progress", "step": 2, "message": "Extracting text layout from PDF..."}
 
-                pages_text = self.pdf_parser.extract_text(file_path)
-                has_text = any(text.strip() for text in pages_text.values())
+                if self.pdf_parser.has_embedded_text(file_path):
+                    pages_blocks = self.pdf_parser.extract_spatial_blocks(file_path)
 
-                if has_text:
-                    logger.info(f"Found text in {len(pages_text)} pages via direct extraction")
-                    # Parse text for structured data
-                    yield {"type": "progress", "step": 3, "message": "Parsing structured data from text..."}
-                    for page_num, text in pages_text.items():
-                        if text.strip():
-                            rows = self.pattern_matcher.extract_from_text(text, page_num)
+                    if pages_blocks:
+                        yield {
+                            "type": "progress",
+                            "step": 3,
+                            "message": f"Parsing {sum(len(b) for b in pages_blocks.values())} text blocks...",
+                        }
+                        for page_num, blocks in pages_blocks.items():
+                            rows = self.pattern_matcher.extract_from_blocks(blocks, page_num)
+                            for r in rows:
+                                r["source"] = "vector"
                             all_rows.extend(rows)
 
-                # Also try OCR on pages (may find additional data)
-                if not has_text or len(all_rows) < 3:
-                    yield {"type": "progress", "step": 2, "message": "Running OCR on PDF pages..."}
+                        logger.info(f"Vector extraction: {len(all_rows)} rows before dedup")
+
+                # --- Phase 2: OCR if not enough from vector extraction ---
+                if len(all_rows) < 5:
+                    yield {
+                        "type": "progress",
+                        "step": 2,
+                        "message": "Converting PDF to images for OCR...",
+                    }
                     try:
                         page_images = self.pdf_parser.convert_to_images(file_path)
+                        total = len(page_images)
                         for page_num, img in enumerate(page_images, 1):
-                            ocr_results = self.ocr_engine.process_image(img)
-                            rows = self.pattern_matcher.extract_from_text(
-                                ocr_results["text"], page_num
-                            )
-                            # Add bounding box info if available
-                            for row in rows:
-                                row["source"] = "ocr"
-                            all_rows.extend(rows)
-                    except Exception as e:
-                        logger.warning(f"OCR fallback failed: {e}")
-                        if not all_rows:
                             yield {
                                 "type": "progress",
-                                "step": 2,
-                                "message": f"OCR warning: {str(e)[:100]}",
+                                "step": 3,
+                                "message": f"OCR processing page {page_num}/{total}...",
                             }
+                            ocr_result = self.ocr_engine.process_image(img)
+
+                            # Use spatial blocks from OCR if available
+                            if ocr_result.get("blocks"):
+                                rows = self.pattern_matcher.extract_from_blocks(
+                                    ocr_result["blocks"], page_num
+                                )
+                            else:
+                                rows = self.pattern_matcher.extract_from_text(
+                                    ocr_result["text"], page_num
+                                )
+                            for r in rows:
+                                r["source"] = "ocr"
+                            all_rows.extend(rows)
+
+                    except Exception as e:
+                        logger.error(f"OCR failed: {e}")
+                        yield {
+                            "type": "progress",
+                            "step": 3,
+                            "message": f"OCR warning: {str(e)[:120]}",
+                        }
 
             elif ext in [".png", ".jpg", ".jpeg"]:
-                # Direct image OCR
                 yield {"type": "progress", "step": 2, "message": "Running OCR on image..."}
-                ocr_results = self.ocr_engine.process_image_file(file_path)
+                ocr_result = self.ocr_engine.process_image_file(file_path)
 
-                yield {"type": "progress", "step": 3, "message": "Parsing structured data..."}
-                rows = self.pattern_matcher.extract_from_text(ocr_results["text"], 1)
-                for row in rows:
-                    row["source"] = "ocr"
+                yield {"type": "progress", "step": 3, "message": "Parsing spatial blocks..."}
+                if ocr_result.get("blocks"):
+                    rows = self.pattern_matcher.extract_from_blocks(ocr_result["blocks"], 1)
+                else:
+                    rows = self.pattern_matcher.extract_from_text(ocr_result["text"], 1)
+                for r in rows:
+                    r["source"] = "ocr"
                 all_rows.extend(rows)
 
             else:
-                yield {
-                    "type": "error",
-                    "message": f"Unsupported file format: {ext}",
-                }
+                yield {"type": "error", "message": f"Unsupported file format: {ext}"}
                 return
 
             # Deduplicate
             all_rows = self._deduplicate(all_rows)
 
-            # Final result
-            yield {"type": "progress", "step": 4, "message": f"Complete — {len(all_rows)} rows extracted"}
+            yield {
+                "type": "progress",
+                "step": 4,
+                "message": f"Complete — {len(all_rows)} booths extracted",
+            }
             yield {"type": "result", "rows": all_rows, "total": len(all_rows)}
 
         except Exception as e:
@@ -112,13 +131,13 @@ class FloorPlanExtractor:
             yield {"type": "error", "message": f"Extraction failed: {str(e)}"}
 
     def _deduplicate(self, rows: list[dict]) -> list[dict]:
-        """Remove duplicate rows based on key fields."""
-        seen = set()
-        unique = []
+        """Remove duplicate rows on (booth_number, exhibitor_name, page)."""
+        seen: set = set()
+        unique: list[dict] = []
         for row in rows:
             key = (
-                row.get("booth_number", ""),
-                row.get("exhibitor_name", ""),
+                str(row.get("booth_number", "")).strip().upper(),
+                str(row.get("exhibitor_name", "")).strip().upper(),
                 row.get("page", ""),
             )
             if key not in seen:
